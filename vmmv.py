@@ -38,7 +38,7 @@ class Storages:
 	def backup(self):
 		return {storage: self.__storages[storage]
 			for storage in self.__storages
-			if 'backup' in self.__storages[storage]['content']}
+			if 'backup' in self.__storages[storage]['content'] and 'path' in self.__storages}
 	def get_item(self, storage, item):
 		if storage not in self.__storages:
 			return None
