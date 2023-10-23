@@ -4,7 +4,6 @@ import sys
 import os
 from subprocess import Popen, PIPE, DEVNULL
 import re
-import re
 
 def program(*args, **kwargs):
 	return Popen([*args], **kwargs)
@@ -15,19 +14,23 @@ class Storages:
 		cfg_storage = re.compile(r'^([\w\-]+): (\w+)$')
 		cfg_conf = re.compile(r'^\s+(\w+) (.+)$')
 		storage = None
-		with open("/etc/pve/storage.cfg", "rt") as f:
-			cfg = [line.rstrip() for line in f.readlines()]
-			for c in cfg:
-				g = cfg_storage.match(c)
-				if g:
-					storage = g.group(2)
-					self.__storages[storage] = {'name': storage}
-					self.__storages[storage]['type'] = g.group(1)
-				elif storage:
-					g = cfg_conf.match(c)
-					if not g:
-						continue
-					self.__storages[storage][g.group(1)] = g.group(2)
+		try:
+			with open("/etc/pve/storage.cfg", "rt") as f:
+				cfg = [line.rstrip() for line in f.readlines()]
+				for c in cfg:
+					g = cfg_storage.match(c)
+					if g:
+						storage = g.group(2)
+						self.__storages[storage] = {'name': storage}
+						self.__storages[storage]['type'] = g.group(1)
+					elif storage:
+						g = cfg_conf.match(c)
+						if g:
+							self.__storages[storage][g.group(1)] = g.group(2)
+						else:
+							self.__storages[storage][c.strip()] = True
+		except FileNotFoundError:
+			return
 	def __getitem__(self, storage):
 		if storage not in self.__storage:
 			return None
@@ -38,7 +41,8 @@ class Storages:
 	def backup(self):
 		return {storage: self.__storages[storage]
 			for storage in self.__storages
-			if 'backup' in self.__storages[storage]['content'] and 'path' in self.__storages}
+			if 'backup' in self.__storages[storage]['content']
+				and 'path' in self.__storages[storage]}
 	def get_item(self, storage, item):
 		if storage not in self.__storages:
 			return None
@@ -54,18 +58,22 @@ class UnitItem:
 			storages = dict(zip(proc.stdout.readline().decode().split(), proc.stdout.readline().decode().split()))
 			proc.wait()
 
+			if self.item not in storages:
+				return None
 			vg = storages[self.item]
-			new = self.__new_vm(_id)
-			program('lvrename', '{}/{}'.format(vg, self.item), '{}/{}'.format(vg, new), stdout=DEVNULL).wait()
+			new = self.__new_disk(_id)
+			program('lvrename', f'{vg}/{self.item}', f'{vg}/{new}', stdout=DEVNULL).wait()
 			return new
 		elif self.__storage['type'] == 'zfspool':
-			proc = program('zfs', 'list', '-H', '-o', 'name', '-t', 'volume', stdout=PIPE)
-			volumes = dict(reversed(line.decode().strip().split("/")) for line in proc.stdout.readlines())
+			proc = program('zfs', 'list', '-H', '-o', 'name', '-t', 'volume,filesystem', stdout=PIPE)
+			volumes = dict(reversed(line.decode().strip().split("/")) for line in proc.stdout.readlines() if line.count(b"/") == 1)
 			proc.wait()
 
+			if self.item not in volumes:
+				return None
 			pool = volumes[self.item]
-			new = self.__new_vm(_id)
-			program("zfs", "rename", '{}/{}'.format(pool, self.item), '{}/{}'.format(pool, new), stdout=DEVNULL).wait()
+			new = self.__new_disk(_id)
+			program("zfs", "rename", f'{pool}/{self.item}', f'{pool}/{new}', stdout=DEVNULL).wait()
 			return new
 		elif self.__storage['type'] in ['dir', 'nfs', 'cifs']:
 			path = self.__storage['path']
@@ -74,12 +82,12 @@ class UnitItem:
 			to = os.path.join(path, "dump", new)
 			os.rename(fr, to)
 			return new
-	def __new_vm(self, _id):
-		m = re.match(r'vm-\d+-disk-(\d+)', self.item)
-		return "vm-{}-disk-{}".format(_id, m[1])
+	def __new_disk(self, _id):
+		m = re.match(r'(vm|subvol|base)-\d+-disk-(\d+)', self.item)
+		return f'{m[1]}-{_id}-disk-{m[2]}'
 	def __new_file(self, _id):
-		m = re.match(r"vzdump-(\w+)-\d+-(.+)", self.item)
-		return "vzdump-{}-{}-{}".format(m[1], _id, m[2])
+		m = re.match(r'vzdump-(\w+)-\d+-(.+)', self.item)
+		return f'vzdump-{m[1]}-{_id}-{m[2]}'
 
 class UnitFile:
 	def __init__(self, _id):
@@ -97,7 +105,7 @@ class UnitFile:
 		if name == "exist":
 			return self.__file is not None
 		else:
-			raise AttributeError("{} does not exist.".format(name))
+			raise AttributeError(f"{name} does not exist.")
 
 	def move(self, newid):
 		if not self.__file:
@@ -109,10 +117,16 @@ class UnitFile:
 
 		storages = Storages()
 
-		pattern = re.compile(r'vm-\d+-disk-(\d+)')
-		for storage, disk in re.findall(r'(\w+):(vm-\d+-disk-\d+)', s):
+		pattern = re.compile(r'(\w+):((?:vm|subvol|base)-\d+-disk-\d+)')
+		for storage, disk in pattern.findall(s):
 			item = storages.get_item(storage, disk)
+			if item is None:
+				print(f"Disk {disk} does not exist in {storage}, ignoring")
+				continue
 			new = item.rename(newid)
+			if new is None:
+				print(f"Disk {disk} does not exist, fatality")
+				continue
 			# Update config
 			s = s.replace(disk, new)
 
@@ -126,6 +140,8 @@ class UnitFile:
 		# Move backups
 		pattern = re.compile(r"vzdump-(\w+)-" + self.__id + r"-(\d{4}_\d{2}_\d{2}-\d{2}_\d{2}_\d{2}(?:\.\w+)+)")
 		for backup in storages.backup().values():
+			if 'disable' in backup and backup['disable']:
+				continue
 			path = os.path.join(backup['path'], "dump")
 			for file in os.listdir(path):
 				m = pattern.match(file)
@@ -142,11 +158,14 @@ class UnitFile:
 		# Set the new id
 		self.__id = newid
 	def __update_pool(self, newid):
-		with open("/etc/pve/user.cfg", "rt") as f:
-			s = f.readlines()
+		try:
+			with open("/etc/pve/user.cfg", "rt") as f:
+				s = f.readlines()
+		except FileNotFoundError:
+			return
 
 		# Update pools
-		change = lambda m: "{}{}{}".format(m[1], newid, m[2])
+		change = lambda m: f"{m[1]}{newid}{m[2]}"
 		pattern = re.compile(r"(,|:){}(,|:)".format(self.__id))
 		for i in range(len(s)):
 			if s[i].startswith("pool:"):
@@ -155,11 +174,14 @@ class UnitFile:
 		with open("/etc/pve/user.cfg", "wt") as f:
 			f.writelines(s)
 	def __update_jobs(self, newid):
-		with open("/etc/pve/jobs.cfg", "rt") as f:
-			s = f.readlines()
+		try:
+			with open("/etc/pve/jobs.cfg", "rt") as f:
+				s = f.readlines()
+		except FileNotFoundError:
+			return
 
 		# Update jobs
-		change = lambda m: "{}{}{}".format(m[1], newid, m[2])
+		change = lambda m: f"{m[1]}{newid}{m[2]}"
 		pattern = re.compile(r"(,| ){}(,|\n)".format(self.__id))
 		for i in range(len(s)):
 			if s[i].strip().startswith("vmid "):
@@ -169,8 +191,11 @@ class UnitFile:
 			f.writelines(s)
 
 def main(argv):
+	if not os.path.exists("/etc/pve"):
+		print("Please run ")
+		return 1
 	if len(argv) != 3:
-		print('{} require 2 ids'.format(argv[0]))
+		print(f"{argv[0]} require 2 ids")
 		return 1
 
 	fromid, toid = argv[1:]
@@ -179,12 +204,12 @@ def main(argv):
 		return 1
 
 	if UnitFile(toid).exist:
-		print("{} already exist".format(toid))
+		print(f"{toid} already exist")
 		return 1
 
 	unit = UnitFile(fromid)
 	if not unit.exist:
-		print("{} is not a vm".format(fromid))
+		print(f"{fromid} is not a vm")
 		return 1
 
 	unit.move(toid)
