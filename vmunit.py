@@ -192,7 +192,7 @@ class UnitFile:
 
 def main(argv):
 	if not os.path.exists("/etc/pve"):
-		print("Please run ")
+		print(f"Please run {argv[0]} directly on your node")
 		return 1
 	if len(argv) != 3:
 		print(f"{argv[0]} require 2 ids")
