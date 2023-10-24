@@ -11,7 +11,7 @@ def program(*args, **kwargs):
 class Storages:
 	def __init__(self):
 		self.__storages = {}
-		cfg_storage = re.compile(r'^([\w\-]+): (\w+)$')
+		cfg_storage = re.compile(r'^(\w+): (.+)$')
 		cfg_conf = re.compile(r'^\s+(\w+) (.+)$')
 		storage = None
 		try:
@@ -29,6 +29,8 @@ class Storages:
 							self.__storages[storage][g.group(1)] = g.group(2)
 						else:
 							self.__storages[storage][c.strip()] = True
+			print(self.__storages.keys())
+			raise Exception()
 		except FileNotFoundError:
 			return
 	def __getitem__(self, storage):
