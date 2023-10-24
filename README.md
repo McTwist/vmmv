@@ -1,11 +1,11 @@
-# vmunit
+# vmmv
 Rename virtual unit id
 
 *Disclaimer: This tool should only be used in a local environment, directly within a Proxmox host. It does not acccount for, nor does it care, about units located on other servers. If a cluster is used, this tool is* **not** *your solution, as it is not tested if the change is propagated. I made this tool for my own set up, which may not suit you.*
 
 ## Usage
 ```
-./vmunit.py <from_id> <to_id>
+./vmmv.py <from_id> <to_id>
 ```
 
 ## What does this do?
